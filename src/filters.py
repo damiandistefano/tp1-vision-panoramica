@@ -1,6 +1,14 @@
 import cv2
 import numpy as np
 
+def pad_image(img, border, color=0):
+
+    h, w = img.shape
+    shape = np.array((h, w))
+    ret = color * np.ones(shape + 2 * border)
+    ret[border:h+border, border:w+border] = img
+    return ret
+
 def correlation(w, f, padding='zero'):
     M, N = f.shape
     m, n = w.shape
