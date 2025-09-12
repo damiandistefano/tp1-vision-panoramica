@@ -109,12 +109,6 @@ def anms(img,keypoints, responses, N):
 
 
 
-
-
-
-
-
-
 def mostrar_matches(img1, kp1, des1, img2, kp2, des2):
     """
     Realiza matching entre dos imágenes usando:
@@ -171,7 +165,7 @@ def mostrar_matches(img1, kp1, des1, img2, kp2, des2):
 
     matchesMask = [[0, 0] for _ in range(len(knn_matches))]
     for i, (m, n) in enumerate(knn_matches):
-        if m.distance < 0.5 * n.distance:
+        if m.distance < 0.75 * n.distance:
             matchesMask[i] = [1, 0]
 
     draw_params = dict(matchColor=(0, 255, 0),       # líneas verdes
@@ -184,3 +178,29 @@ def mostrar_matches(img1, kp1, des1, img2, kp2, des2):
     )
 
     return res_img_manual, res_img_ratio
+
+
+def match_sift_indices(desA, desB, ratio=0.75, cross_check=True):
+    bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+    knnAB = bf.knnMatch(desA, desB, k=2)
+    ab = [(m.queryIdx, m.trainIdx) for m,n in knnAB if m.distance < ratio*n.distance]
+    if not cross_check:
+        return np.array(ab, dtype=int)
+    knnBA = bf.knnMatch(desB, desA, k=2)
+    ba = {(m.queryIdx, m.trainIdx) for m,n in knnBA if m.distance < ratio*n.distance}
+    inter = np.array([p for p in ab if (p[1], p[0]) in ba], dtype=int)
+    # opcional: orden estable
+    if inter.size > 0:
+        inter = inter[np.lexsort((inter[:,1], inter[:,0]))]
+    return inter
+
+def kp_to_xy(kp):
+    # lista de cv2.KeyPoint o array (N,7)-> (N,2)
+    if isinstance(kp, np.ndarray):
+        return kp[:, :2].astype(np.float64)
+    return np.array([k.pt for k in kp], dtype=np.float64)
+
+def build_pts_from_pairs(kpA, kpB, pairs_idx):
+    xyA, xyB = kp_to_xy(kpA), kp_to_xy(kpB)
+    iA, iB = pairs_idx[:,0], pairs_idx[:,1]
+    return xyA[iA], xyB[iB]
