@@ -2,13 +2,6 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
-def resize(img, w):
-    w_, h_ = img.shape[1], img.shape[0]
-    s = w / w_                  # factor de escala
-    h = int(h_ * s)
-    resized = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-    return resized, s
-
 
 def detectar_caracteristicas(img_color,sift):
     """
@@ -36,18 +29,12 @@ def detectar_caracteristicas(img_color,sift):
     for k in kp:
         k.size = 30
 
-    # Dibujar los keypoints
-    img_kp = cv2.drawKeypoints(
-        img_color, kp, None,
-        flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS,
-        color=(0, 255, 0)
-    )
 
-    return img_kp, kp, responses , des
+    return kp, responses , des
 
 
 
-def anms(img,keypoints, responses, N):
+def anms(keypoints, responses, N):
     """
     Adaptive Non-Maximal Suppression (ANMS) compatible con:
       - keypoints: lista de cv2.KeyPoint
@@ -63,9 +50,6 @@ def anms(img,keypoints, responses, N):
     
 
     responses = np.asarray(responses, dtype=np.float32)
-    
-    if responses.shape[0] != K:
-        raise ValueError("La longitud de 'responses' debe coincidir con la de 'keypoints'")
 
     # Extraer coordenadas (x,y)
     pts = np.array([kp.pt for kp in keypoints], dtype=np.float32)  # shape (K,2)
@@ -95,17 +79,7 @@ def anms(img,keypoints, responses, N):
     keypoints_sel = [keypoints[i] for i in selected]
     responses_sel = responses[selected]
 
-
-    img_anms = cv2.drawKeypoints(
-        img,
-        keypoints_sel,  
-        None,
-        flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS,
-        color=(0, 255, 0)
-    )
-
-
-    return img_anms,keypoints_sel, responses_sel, selected
+    return keypoints_sel, responses_sel, selected
 
 
 
@@ -176,138 +150,308 @@ def reprojection_rmse(H, src, dst):
     return float(np.sqrt(np.mean(d**2))), d
 
 
-# ---------- RANSAC ----------
-def ransac_homography(pts1, pts2, thresh=3.0, max_iters=2000, confidence=0.999, random_state=None):
+# # ---------- RANSAC ----------
+# def ransac_homography(pts1, pts2, thresh=3.0, max_iters=2000, confidence=0.999, random_state=None):
+#     """
+#     Estima H con RANSAC sin OpenCV.
+#     pts1, pts2: (N,2) correspondencias
+#     thresh: umbral de inliers en píxeles (error simétrico <= thresh^2*2 aprox)
+#     max_iters: tope duro
+#     confidence: prob. de tener al menos una muestra libre de outliers (ajusta iteraciones adaptativamente)
+#     return: H_best (3x3), inlier_mask (N,bool), stats (dict)
+#     """
+#     rng = np.random.default_rng(random_state)
+#     pts1 = np.asarray(pts1, dtype=np.float64)
+#     pts2 = np.asarray(pts2, dtype=np.float64)
+#     N = pts1.shape[0]
+#     if N < 4:
+#         raise ValueError("Se requieren al menos 4 correspondencias.")
+
+#     best_H = None
+#     best_inliers = None
+#     best_inlier_count = 0
+
+#     s = 4  # tamaño de muestra mínima para homografía
+#     # Iteraciones adaptativas (se actualiza cuando mejora w)
+#     it = 0
+#     max_adaptive = max_iters
+
+#     while it < max_adaptive:
+#         it += 1
+#         # 1) Muestreo mínimo sin reemplazo
+#         idx = rng.choice(N, size=s, replace=False)
+#         try:
+#             H = _homography_dlt(pts1[idx], pts2[idx])
+#         except np.linalg.LinAlgError:
+#             continue  # muestra degenerada (colineal, etc.)
+
+#         # 2) Medir errores para todos
+#         errs = _symmetric_transfer_errors(H, pts1, pts2)
+
+#         # 3) Inliers
+#         # Comparación con thresh en píxeles: usamos err <= 2*thresh^2 (dos proyecciones)
+#         thr2 = 2.0 * (thresh**2)
+#         inliers = errs <= thr2
+#         count = int(np.sum(inliers))
+
+#         # 4) Actualizar mejor
+#         if count > best_inlier_count:
+#             best_inlier_count = count
+#             best_inliers = inliers
+#             best_H = H
+
+#             # 5) Actualizar nº de iteraciones necesarias (adaptativo)
+#             w = count / float(N)
+#             w = np.clip(w, 1e-6, 1-1e-6)
+#             num = np.log(1 - confidence)
+#             den = np.log(1 - (w**s))
+#             max_adaptive = min(max_iters, int(np.ceil(num / den)))
+#             if max_adaptive <= it:  # ya alcanzamos la confianza deseada
+#                 break
+
+#     if best_H is None:
+#         raise RuntimeError("RANSAC no encontró un modelo válido.")
+
+#     # 6) Re‐estimar H con TODOS los inliers (DLT robusta)
+#     H_refined = _homography_dlt(pts1[best_inliers], pts2[best_inliers])
+
+#     # 7) Métricas finales
+#     final_errs = _symmetric_transfer_errors(H_refined, pts1, pts2)
+#     thr2 = 2.0 * (thresh**2)
+#     final_inliers = final_errs <= thr2
+#     stats = {
+#         "iterations": it,
+#         "inliers": int(np.sum(final_inliers)),
+#         "total": N,
+#         "inlier_ratio": float(np.sum(final_inliers)) / float(N),
+#         "mean_sym_err_inliers": float(np.mean(final_errs[final_inliers])) if np.any(final_inliers) else np.inf,
+#     }
+
+#     return H_refined, final_inliers, stats
+
+# # ---------- Error de transferencia simétrico ----------
+# def _symmetric_transfer_errors(H, pts1, pts2):
+#     """
+#     Error simétrico en píxeles^2:
+#     e = ||x2 - H x1||^2 + ||x1 - H^{-1} x2||^2  (en coordenadas cartesianas)
+#     Retorna vector (N,)
+#     """
+#     pts1 = np.asarray(pts1, dtype=np.float64)
+#     pts2 = np.asarray(pts2, dtype=np.float64)
+#     N = pts1.shape[0]
+
+#     # x2_hat = H x1
+#     ones = np.ones((N,1))
+#     x1h = np.hstack([pts1, ones])
+#     x2h = np.hstack([pts2, ones])
+
+#     Hx1 = (H @ x1h.T).T
+#     Hx1 = Hx1[:, :2] / Hx1[:, 2:3]
+#     err1 = np.sum((Hx1 - pts2)**2, axis=1)
+
+#     # x1_hat = H^{-1} x2
+#     try:
+#         Hinv = np.linalg.inv(H)
+#     except np.linalg.LinAlgError:
+#         # Si H no es invertible, penalizá fuerte
+#         return np.full(N, np.inf)
+#     Hinvx2 = (Hinv @ x2h.T).T
+#     Hinvx2 = Hinvx2[:, :2] / Hinvx2[:, 2:3]
+#     err2 = np.sum((Hinvx2 - pts1)**2, axis=1)
+
+#     return err1 + err2
+
+
+
+def _normalize_points(pts):
     """
-    Estima H con RANSAC sin OpenCV.
-    pts1, pts2: (N,2) correspondencias
-    thresh: umbral de inliers en píxeles (error simétrico <= thresh^2*2 aprox)
-    max_iters: tope duro
-    confidence: prob. de tener al menos una muestra libre de outliers (ajusta iteraciones adaptativamente)
-    return: H_best (3x3), inlier_mask (N,bool), stats (dict)
+    Normaliza puntos 2D (Nx2) de forma isotrópica (traslación + escala) para DLT.
+    Devuelve (T, pts_norm) donde T es la matriz 3x3 de normalización y pts_norm son Nx2.
     """
-    rng = np.random.default_rng(random_state)
-    pts1 = np.asarray(pts1, dtype=np.float64)
-    pts2 = np.asarray(pts2, dtype=np.float64)
+    mean = pts.mean(axis=0)
+    pts_centered = pts - mean
+    mean_dist = np.mean(np.sqrt(np.sum(pts_centered**2, axis=1)))
+    if mean_dist < 1e-9:
+        scale = 1.0
+    else:
+        scale = np.sqrt(2) / mean_dist
+    T = np.array([
+        [scale, 0, -scale * mean[0]],
+        [0, scale, -scale * mean[1]],
+        [0,    0,               1.0]
+    ], dtype=np.float64)
+    # aplicar T
+    ones = np.ones((pts.shape[0], 1), dtype=np.float64)
+    pts_h = np.hstack([pts, ones])
+    pts_norm_h = (T @ pts_h.T).T
+    pts_norm = pts_norm_h[:, :2] / pts_norm_h[:, 2:3]
+    return T, pts_norm
+
+def _homography_dlt(pts1, pts2):
+    """
+    Estima homografía H (3x3) que mapea pts1 -> pts2 usando DLT con normalización.
+    pts1, pts2: Nx2 arrays con N >= 4.
+    Devuelve H con H[2,2] == 1 (si es posible); si falla devuelve None.
+    """
+    n = pts1.shape[0]
+    
+    T1, p1n = _normalize_points(pts1)
+    T2, p2n = _normalize_points(pts2)
+
+    A = []
+    for i in range(n):
+        x, y = p1n[i,0], p1n[i,1]
+        u, v = p2n[i,0], p2n[i,1]
+        A.append([-x, -y, -1,   0,  0,  0, x*u, y*u, u])
+        A.append([ 0,  0,  0,  -x, -y, -1, x*v, y*v, v])
+    A = np.array(A, dtype=np.float64)
+    # SVD
+    U, S, Vt = np.linalg.svd(A)
+    h = Vt[-1, :]
+    Hn = h.reshape(3,3)
+    # Des-normalizar: H = T2^{-1} * Hn * T1
+    H = np.linalg.inv(T2) @ Hn @ T1
+    # Normalizar para que H[2,2] == 1 si posible
+    if np.abs(H[2,2]) < 1e-12:
+        H = H / (np.linalg.norm(H))
+    else:
+        H = H / H[2,2]
+    return H
+
+def _reprojection_errors(H, pts1, pts2):
+    """
+    Calcula la distancia euclidiana (reprojection error) entre pts2 y H*pts1.
+    Devuelve array de tamaño N con errores.
+    """
+    n = pts1.shape[0]
+    ones = np.ones((n,1), dtype=np.float64)
+    p1h = np.hstack([pts1, ones])
+    proj_h = (H @ p1h.T).T  # Nx3
+    proj_xy = proj_h[:, :2] / proj_h[:, 2:3]
+    errs = np.linalg.norm(proj_xy - pts2, axis=1)
+    return errs
+
+def ransac_homography(pts1,pts2,n_iter = 2000,reproj_thresh = 4.0,
+    min_inliers = 4,stop_inlier_ratio = 0.995,
+    random_seed = 42,refine = True) :
+    """
+    RANSAC para homografía: estima H que mapea pts1 -> pts2.
+
+    Args:
+        pts1, pts2: arrays (N,2) float, con correspondencias punto a punto.
+        n_iter: número máximo de iteraciones RANSAC.
+        reproj_thresh: umbral (en píxeles) para considerar un inlier por reproyección.
+        min_inliers: mínimo de inliers aceptable para considerar resultado válido.
+        stop_inlier_ratio: si se alcanza esta fracción de inliers respecto N termina antes.
+        random_seed: semilla aleatoria (opcional).
+        refine: si True, recomputa H usando *todos* los inliers finales (DLT).
+
+    Returns: diccionario con:
+        - 'H': homografía 3x3 (o None si no se encontró modelo válido)
+        - 'mask': array uint8 (N,) con 1 para inlier, 0 para outlier (si H is None -> zeros)
+        - 'inliers_idx': lista de índices inliers
+        - 'inlier_ratio': fracción de inliers (float)
+        - 'reproj_errors': array (N,) con errores de reproyección (inf si H None)
+        - 'num_inliers': número de inliers (int)
+        - 'iterations': iteraciones realmente usadas (int)
+        - 'status': 'ok' or 'not_enough_inliers'
+    """
+
     N = pts1.shape[0]
-    if N < 4:
-        raise ValueError("Se requieren al menos 4 correspondencias.")
+    rng = np.random.default_rng(random_seed)
 
     best_H = None
-    best_inliers = None
-    best_inlier_count = 0
+    best_inliers = np.zeros((N,), dtype=bool)
+    best_count = 0
+    best_errors = np.full((N,), np.inf, dtype=np.float64)
+    iterations_used = 0
 
-    s = 4  # tamaño de muestra mínima para homografía
-    # Iteraciones adaptativas (se actualiza cuando mejora w)
-    it = 0
-    max_adaptive = max_iters
+    for it in range(n_iter):
+        iterations_used += 1
+        # muestreo aleatorio de 4 indices distintos
+        idx = rng.choice(N, size=4, replace=False)
+    
+        H_candidate = _homography_dlt(pts1[idx], pts2[idx])
+        
 
-    while it < max_adaptive:
-        it += 1
-        # 1) Muestreo mínimo sin reemplazo
-        idx = rng.choice(N, size=s, replace=False)
-        try:
-            H = _homography_dlt(pts1[idx], pts2[idx])
-        except np.linalg.LinAlgError:
-            continue  # muestra degenerada (colineal, etc.)
+        errs = _reprojection_errors(H_candidate, pts1, pts2)
+        inliers = errs <= reproj_thresh
+        count = int(inliers.sum())
 
-        # 2) Medir errores para todos
-        errs = _symmetric_transfer_errors(H, pts1, pts2)
-
-        # 3) Inliers
-        # Comparación con thresh en píxeles: usamos err <= 2*thresh^2 (dos proyecciones)
-        thr2 = 2.0 * (thresh**2)
-        inliers = errs <= thr2
-        count = int(np.sum(inliers))
-
-        # 4) Actualizar mejor
-        if count > best_inlier_count:
-            best_inlier_count = count
+        # actualizar mejor modelo
+        if count > best_count:
+            best_count = count
+            best_H = H_candidate
             best_inliers = inliers
-            best_H = H
+            best_errors = errs
 
-            # 5) Actualizar nº de iteraciones necesarias (adaptativo)
-            w = count / float(N)
-            w = np.clip(w, 1e-6, 1-1e-6)
-            num = np.log(1 - confidence)
-            den = np.log(1 - (w**s))
-            max_adaptive = min(max_iters, int(np.ceil(num / den)))
-            if max_adaptive <= it:  # ya alcanzamos la confianza deseada
+            # early stop si alcanzamos umbral
+            if (best_count / N) >= stop_inlier_ratio:
                 break
 
-    if best_H is None:
-        raise RuntimeError("RANSAC no encontró un modelo válido.")
+    # comprobar resultado
+    if best_H is None or best_count < min_inliers:
+        return {
+            'H': None,
+            'mask': np.zeros((N,), dtype=np.uint8),
+            'inliers_idx': [],
+            'inlier_ratio': 0.0,
+            'reproj_errors': np.full((N,), np.inf, dtype=np.float64),
+            'num_inliers': 0,
+            'iterations': iterations_used,
+            'status': 'not_enough_inliers'
+        }
 
-    # 6) Re‐estimar H con TODOS los inliers (DLT robusta)
-    H_refined = _homography_dlt(pts1[best_inliers], pts2[best_inliers])
+    # Refinar con todos los inliers si se pide
+    if refine:
+        inlier_idxs = np.nonzero(best_inliers)[0]
+        H_refined = _homography_dlt(pts1[inlier_idxs], pts2[inlier_idxs])
+        # recalcular errores con H_refined
+        final_errors = _reprojection_errors(H_refined, pts1, pts2)
+        final_inliers = final_errors <= reproj_thresh
+        # si el refinado empeora drásticamente el número de inliers, mantener el anterior
+        if final_inliers.sum() >= max(min_inliers, int(0.5 * best_count)):
+            best_H = H_refined
+            best_inliers = final_inliers
+            best_errors = final_errors
 
-    # 7) Métricas finales
-    final_errs = _symmetric_transfer_errors(H_refined, pts1, pts2)
-    thr2 = 2.0 * (thresh**2)
-    final_inliers = final_errs <= thr2
-    stats = {
-        "iterations": it,
-        "inliers": int(np.sum(final_inliers)),
-        "total": N,
-        "inlier_ratio": float(np.sum(final_inliers)) / float(N),
-        "mean_sym_err_inliers": float(np.mean(final_errs[final_inliers])) if np.any(final_inliers) else np.inf,
+
+    mask = best_inliers.astype(np.uint8)
+    inliers_idx = list(np.nonzero(best_inliers)[0])
+    inlier_ratio = mask.sum() / N
+    result = {
+        'H': best_H,
+        'mask': mask,
+        'inliers_idx': inliers_idx,
+        'inlier_ratio': float(inlier_ratio),
+        'reproj_errors': best_errors,
+        'num_inliers': int(mask.sum()),
+        'iterations': iterations_used,
+        'status': 'ok'
     }
+    return result
 
-    return H_refined, final_inliers, stats
 
-# ---------- Error de transferencia simétrico ----------
-def _symmetric_transfer_errors(H, pts1, pts2):
-    """
-    Error simétrico en píxeles^2:
-    e = ||x2 - H x1||^2 + ||x1 - H^{-1} x2||^2  (en coordenadas cartesianas)
-    Retorna vector (N,)
-    """
-    pts1 = np.asarray(pts1, dtype=np.float64)
-    pts2 = np.asarray(pts2, dtype=np.float64)
-    N = pts1.shape[0]
 
-    # x2_hat = H x1
-    ones = np.ones((N,1))
-    x1h = np.hstack([pts1, ones])
-    x2h = np.hstack([pts2, ones])
 
-    Hx1 = (H @ x1h.T).T
-    Hx1 = Hx1[:, :2] / Hx1[:, 2:3]
-    err1 = np.sum((Hx1 - pts2)**2, axis=1)
 
-    # x1_hat = H^{-1} x2
-    try:
-        Hinv = np.linalg.inv(H)
-    except np.linalg.LinAlgError:
-        # Si H no es invertible, penalizá fuerte
-        return np.full(N, np.inf)
-    Hinvx2 = (Hinv @ x2h.T).T
-    Hinvx2 = Hinvx2[:, :2] / Hinvx2[:, 2:3]
-    err2 = np.sum((Hinvx2 - pts1)**2, axis=1)
 
-    return err1 + err2
 
-def match_sift_indices(desA, desB, ratio=0.75, cross_check=True):
-    bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
-    knnAB = bf.knnMatch(desA, desB, k=2)
-    ab = [(m.queryIdx, m.trainIdx) for m,n in knnAB if m.distance < ratio*n.distance]
-    if not cross_check:
-        return np.array(ab, dtype=int)
-    knnBA = bf.knnMatch(desB, desA, k=2)
-    ba = {(m.queryIdx, m.trainIdx) for m,n in knnBA if m.distance < ratio*n.distance}
-    inter = np.array([p for p in ab if (p[1], p[0]) in ba], dtype=int)
-    # opcional: orden estable
-    if inter.size > 0:
-        inter = inter[np.lexsort((inter[:,1], inter[:,0]))]
-    return inter
 
-def kp_to_xy(kp):
-    # lista de cv2.KeyPoint o array (N,7)-> (N,2)
-    if isinstance(kp, np.ndarray):
-        return kp[:, :2].astype(np.float64)
-    return np.array([k.pt for k in kp], dtype=np.float64)
 
-def build_pts_from_pairs(kpA, kpB, pairs_idx):
-    xyA, xyB = kp_to_xy(kpA), kp_to_xy(kpB)
-    iA, iB = pairs_idx[:,0], pairs_idx[:,1]
-    return xyA[iA], xyB[iB]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
