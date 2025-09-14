@@ -151,118 +151,6 @@ def reprojection_rmse(H, src, dst):
     return float(np.sqrt(np.mean(d**2))), d
 
 
-# # ---------- RANSAC ----------
-# def ransac_homography(pts1, pts2, thresh=3.0, max_iters=2000, confidence=0.999, random_state=None):
-#     """
-#     Estima H con RANSAC sin OpenCV.
-#     pts1, pts2: (N,2) correspondencias
-#     thresh: umbral de inliers en píxeles (error simétrico <= thresh^2*2 aprox)
-#     max_iters: tope duro
-#     confidence: prob. de tener al menos una muestra libre de outliers (ajusta iteraciones adaptativamente)
-#     return: H_best (3x3), inlier_mask (N,bool), stats (dict)
-#     """
-#     rng = np.random.default_rng(random_state)
-#     pts1 = np.asarray(pts1, dtype=np.float64)
-#     pts2 = np.asarray(pts2, dtype=np.float64)
-#     N = pts1.shape[0]
-#     if N < 4:
-#         raise ValueError("Se requieren al menos 4 correspondencias.")
-
-#     best_H = None
-#     best_inliers = None
-#     best_inlier_count = 0
-
-#     s = 4  # tamaño de muestra mínima para homografía
-#     # Iteraciones adaptativas (se actualiza cuando mejora w)
-#     it = 0
-#     max_adaptive = max_iters
-
-#     while it < max_adaptive:
-#         it += 1
-#         # 1) Muestreo mínimo sin reemplazo
-#         idx = rng.choice(N, size=s, replace=False)
-#         try:
-#             H = _homography_dlt(pts1[idx], pts2[idx])
-#         except np.linalg.LinAlgError:
-#             continue  # muestra degenerada (colineal, etc.)
-
-#         # 2) Medir errores para todos
-#         errs = _symmetric_transfer_errors(H, pts1, pts2)
-
-#         # 3) Inliers
-#         # Comparación con thresh en píxeles: usamos err <= 2*thresh^2 (dos proyecciones)
-#         thr2 = 2.0 * (thresh**2)
-#         inliers = errs <= thr2
-#         count = int(np.sum(inliers))
-
-#         # 4) Actualizar mejor
-#         if count > best_inlier_count:
-#             best_inlier_count = count
-#             best_inliers = inliers
-#             best_H = H
-
-#             # 5) Actualizar nº de iteraciones necesarias (adaptativo)
-#             w = count / float(N)
-#             w = np.clip(w, 1e-6, 1-1e-6)
-#             num = np.log(1 - confidence)
-#             den = np.log(1 - (w**s))
-#             max_adaptive = min(max_iters, int(np.ceil(num / den)))
-#             if max_adaptive <= it:  # ya alcanzamos la confianza deseada
-#                 break
-
-#     if best_H is None:
-#         raise RuntimeError("RANSAC no encontró un modelo válido.")
-
-#     # 6) Re‐estimar H con TODOS los inliers (DLT robusta)
-#     H_refined = _homography_dlt(pts1[best_inliers], pts2[best_inliers])
-
-#     # 7) Métricas finales
-#     final_errs = _symmetric_transfer_errors(H_refined, pts1, pts2)
-#     thr2 = 2.0 * (thresh**2)
-#     final_inliers = final_errs <= thr2
-#     stats = {
-#         "iterations": it,
-#         "inliers": int(np.sum(final_inliers)),
-#         "total": N,
-#         "inlier_ratio": float(np.sum(final_inliers)) / float(N),
-#         "mean_sym_err_inliers": float(np.mean(final_errs[final_inliers])) if np.any(final_inliers) else np.inf,
-#     }
-
-#     return H_refined, final_inliers, stats
-
-# # ---------- Error de transferencia simétrico ----------
-# def _symmetric_transfer_errors(H, pts1, pts2):
-#     """
-#     Error simétrico en píxeles^2:
-#     e = ||x2 - H x1||^2 + ||x1 - H^{-1} x2||^2  (en coordenadas cartesianas)
-#     Retorna vector (N,)
-#     """
-#     pts1 = np.asarray(pts1, dtype=np.float64)
-#     pts2 = np.asarray(pts2, dtype=np.float64)
-#     N = pts1.shape[0]
-
-#     # x2_hat = H x1
-#     ones = np.ones((N,1))
-#     x1h = np.hstack([pts1, ones])
-#     x2h = np.hstack([pts2, ones])
-
-#     Hx1 = (H @ x1h.T).T
-#     Hx1 = Hx1[:, :2] / Hx1[:, 2:3]
-#     err1 = np.sum((Hx1 - pts2)**2, axis=1)
-
-#     # x1_hat = H^{-1} x2
-#     try:
-#         Hinv = np.linalg.inv(H)
-#     except np.linalg.LinAlgError:
-#         # Si H no es invertible, penalizá fuerte
-#         return np.full(N, np.inf)
-#     Hinvx2 = (Hinv @ x2h.T).T
-#     Hinvx2 = Hinvx2[:, :2] / Hinvx2[:, 2:3]
-#     err2 = np.sum((Hinvx2 - pts1)**2, axis=1)
-
-#     return err1 + err2
-
-
 
 def _normalize_points(pts):
     """
@@ -334,7 +222,7 @@ def _reprojection_errors(H, pts1, pts2):
 
 def ransac_homography(pts1,pts2,n_iter = 2000,reproj_thresh = 4.0,
     min_inliers = 4,stop_inlier_ratio = 0.995,
-    random_seed = 42,refine = True) :
+    random_seed = 42) :
     """
     RANSAC para homografía: estima H que mapea pts1 -> pts2.
 
@@ -345,7 +233,6 @@ def ransac_homography(pts1,pts2,n_iter = 2000,reproj_thresh = 4.0,
         min_inliers: mínimo de inliers aceptable para considerar resultado válido.
         stop_inlier_ratio: si se alcanza esta fracción de inliers respecto N termina antes.
         random_seed: semilla aleatoria (opcional).
-        refine: si True, recomputa H usando *todos* los inliers finales (DLT).
 
     Returns: diccionario con:
         - 'H': homografía 3x3 (o None si no se encontró modelo válido)
@@ -402,19 +289,6 @@ def ransac_homography(pts1,pts2,n_iter = 2000,reproj_thresh = 4.0,
             'iterations': iterations_used,
             'status': 'not_enough_inliers'
         }
-
-    # Refinar con todos los inliers si se pide
-    if refine:
-        inlier_idxs = np.nonzero(best_inliers)[0]
-        H_refined = _homography_dlt(pts1[inlier_idxs], pts2[inlier_idxs])
-        # recalcular errores con H_refined
-        final_errors = _reprojection_errors(H_refined, pts1, pts2)
-        final_inliers = final_errors <= reproj_thresh
-        # si el refinado empeora drásticamente el número de inliers, mantener el anterior
-        if final_inliers.sum() >= max(min_inliers, int(0.5 * best_count)):
-            best_H = H_refined
-            best_inliers = final_inliers
-            best_errors = final_errors
 
 
     mask = best_inliers.astype(np.uint8)

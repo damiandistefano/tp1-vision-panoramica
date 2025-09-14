@@ -113,7 +113,7 @@ def match_descriptors(desc1,desc2,kps1,kps2,
 def draw_matches_side_by_side(
     imgA, imgB,
     pts_A, pts_B,
-    title="Correspondencias manuales",
+    title="Correspondencias",
     figsize=(12,6),
     point_radius=6,
 ):
@@ -177,7 +177,7 @@ def draw_matches_side_by_side(
 
 
 def draw_matches_ransac(imgA, kpA, imgB, kpB, matches_or_pairs, ransac_result,
-                        title=None, kp_radius=4, line_thickness=1):
+                         kp_radius=4, line_thickness=1):
     """
     Dibuja collage A|B con inliers (verde) y outliers (rojo) según RANSAC.
     
@@ -222,20 +222,76 @@ def draw_matches_ransac(imgA, kpA, imgB, kpB, matches_or_pairs, ransac_result,
         cv2.circle(canvas, (int(x1),int(y1)), kp_radius, color, -1, cv2.LINE_AA)
         cv2.circle(canvas, (int(wA+x2),int(y2)), kp_radius, color, -1, cv2.LINE_AA)
 
-    if title:
-        cv2.putText(canvas, title, (16,36), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2, cv2.LINE_AA)
-
     return canvas
 
 
 
-import cv2
-import numpy as np
+
+# blending: feathering usando distance transform
+def make_weight_map(mask):
+    # mask: uint8 0/1
+    if np.count_nonzero(mask) == 0:
+        return np.zeros_like(mask, dtype=np.float32)
+    mask_u8 = (mask * 255).astype(np.uint8)
+    # distanceTransform requiere fondo=0, foreground>0
+    dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
+    # normalizar por el máximo para que el centro tenga peso ~1
+    maxv = dist.max()
+    if maxv > 0:
+        dist = dist / maxv
+    # suavizar un poco para evitar artefactos
+    dist = cv2.GaussianBlur(dist, (0, 0), sigmaX=3, sigmaY=3)
+    return dist.astype(np.float32)
+
+
+
+def _bgr(img):
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if img.shape[2] == 4:
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
+
+
+def corners(img):
+    h, w = img.shape[:2]
+    return np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
+
+
+
+# compensación de exposición simple (ganancia por canal basada en la mediana del solapamiento)
+def compensate_exp(src, ref, mask_src, mask_ref):
+    overlap = (mask_src.astype(bool)) & (mask_ref.astype(bool))
+    if not np.any(overlap):
+        return src  # sin solapamiento, no tocar
+    src_f = src.astype(np.float32)
+    ref_f = ref.astype(np.float32)
+    gains = np.ones(3, dtype=np.float32)
+    for c in range(3):
+        src_vals = src_f[:, :, c][overlap]
+        ref_vals = ref_f[:, :, c][overlap]
+        # evitar ceros y valores fuera de rango
+        valid = (src_vals > 1) & (ref_vals > 1)
+        if np.any(valid):
+            # usar mediana de razones (robusta frente a outliers)
+            ratio = np.median(ref_vals[valid] / (src_vals[valid] + 1e-8))
+            # limitar ratio para evitar cambios extremos
+            ratio = float(np.clip(ratio, 0.7, 1.3))
+            gains[c] = ratio
+    # aplicar ganancia por canal
+    out = src.astype(np.float32)
+    out[:, :, 0] *= gains[0]
+    out[:, :, 1] *= gains[1]
+    out[:, :, 2] *= gains[2]
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    return out
 
 
 def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC,
                         exposure_compensate=True,
                         blend_type='feather'):
+    
+
     """
     Une 3 imágenes en una panorámica, usando homografías al plano de la imagen central.
     Añade blending para disimular bordes mediante "feathering" (desvanecimiento por distancia).
@@ -251,20 +307,10 @@ def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC,
         panorama: imagen panorámica (np.uint8, BGR).
     """
 
-    def _bgr(img):
-        if img.ndim == 2:
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        if img.shape[2] == 4:
-            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        return img
 
     imgL, imgC, imgR = _bgr(imgL), _bgr(imgC), _bgr(imgR)
 
     hC, wC = imgC.shape[:2]
-
-    def corners(img):
-        h, w = img.shape[:2]
-        return np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
 
     cornersC = corners(imgC)
     cornersL_warp = cv2.perspectiveTransform(corners(imgL), H_LC)
@@ -290,33 +336,7 @@ def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC,
     maskR = np.any(warpR != 0, axis=2).astype(np.uint8)
     maskC = np.any(warpC != 0, axis=2).astype(np.uint8)
 
-    # compensación de exposición simple (ganancia por canal basada en la mediana del solapamiento)
-    def compensate_exp(src, ref, mask_src, mask_ref):
-        overlap = (mask_src.astype(bool)) & (mask_ref.astype(bool))
-        if not np.any(overlap):
-            return src  # sin solapamiento, no tocar
-        src_f = src.astype(np.float32)
-        ref_f = ref.astype(np.float32)
-        gains = np.ones(3, dtype=np.float32)
-        for c in range(3):
-            src_vals = src_f[:, :, c][overlap]
-            ref_vals = ref_f[:, :, c][overlap]
-            # evitar ceros y valores fuera de rango
-            valid = (src_vals > 1) & (ref_vals > 1)
-            if np.any(valid):
-                # usar mediana de razones (robusta frente a outliers)
-                ratio = np.median(ref_vals[valid] / (src_vals[valid] + 1e-8))
-                # limitar ratio para evitar cambios extremos
-                ratio = float(np.clip(ratio, 0.7, 1.3))
-                gains[c] = ratio
-        # aplicar ganancia por canal
-        out = src.astype(np.float32)
-        out[:, :, 0] *= gains[0]
-        out[:, :, 1] *= gains[1]
-        out[:, :, 2] *= gains[2]
-        out = np.clip(out, 0, 255).astype(np.uint8)
-        return out
-
+    
     if exposure_compensate:
         # ajustar L y R para que su exposición sea coherente con C
         warpL = compensate_exp(warpL, warpC, maskL, maskC)
@@ -325,22 +345,6 @@ def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC,
         # recomputar masks porque pueden haber cambiado por el clamp
         maskL = np.any(warpL != 0, axis=2).astype(np.uint8)
         maskR = np.any(warpR != 0, axis=2).astype(np.uint8)
-
-    # blending: feathering usando distance transform
-    def make_weight_map(mask):
-        # mask: uint8 0/1
-        if np.count_nonzero(mask) == 0:
-            return np.zeros_like(mask, dtype=np.float32)
-        mask_u8 = (mask * 255).astype(np.uint8)
-        # distanceTransform requiere fondo=0, foreground>0
-        dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
-        # normalizar por el máximo para que el centro tenga peso ~1
-        maxv = dist.max()
-        if maxv > 0:
-            dist = dist / maxv
-        # suavizar un poco para evitar artefactos
-        dist = cv2.GaussianBlur(dist, (0, 0), sigmaX=3, sigmaY=3)
-        return dist.astype(np.float32)
 
     wL = make_weight_map(maskL)
     wC = make_weight_map(maskC)
@@ -377,14 +381,3 @@ def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC,
 
     return panorama
 
-
-if __name__ == '__main__':
-    # ejemplo de uso (requiere cv2 y numpy)
-    # imgL = cv2.imread('left.jpg')
-    # imgC = cv2.imread('center.jpg')
-    # imgR = cv2.imread('right.jpg')
-    # H_LC = np.eye(3)  # reemplazar con homografía real
-    # H_RC = np.eye(3)
-    # pano = stitch_three_images(imgL, imgC, imgR, H_LC, H_RC)
-    # cv2.imwrite('panorama.jpg', pano)
-    pass
