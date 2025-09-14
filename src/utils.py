@@ -88,6 +88,7 @@ def pick_points_cv(img, win_name="Pick 4 points", n_points=4, out_npy=None):
    
     points = []
 
+    img= img.copy()
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and len(points) < n_points:
             points.append((x, y))

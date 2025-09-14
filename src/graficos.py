@@ -2,7 +2,6 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from .utils import kp_to_xy as _kp_xy
 
 
 def graficar_puntos(imgs, pts, title="Puntos seleccionados", point_radius=5, figsize=(12,6)):
@@ -230,32 +229,42 @@ def draw_matches_ransac(imgA, kpA, imgB, kpB, matches_or_pairs, ransac_result,
 
 
 
+import cv2
+import numpy as np
 
-def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC):
+
+def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC,
+                        exposure_compensate=True,
+                        blend_type='feather'):
     """
     Une 3 imágenes en una panorámica, usando homografías al plano de la imagen central.
+    Añade blending para disimular bordes mediante "feathering" (desvanecimiento por distancia).
 
     Args:
         imgL, imgC, imgR: imágenes izquierda, centro y derecha (np.uint8, BGR o gray).
         H_LC: homografía que mapea puntos de imgL -> imgC
         H_RC: homografía que mapea puntos de imgR -> imgC
+        exposure_compensate: si True, ajusta ganancia de L/R para igualar exposición con C.
+        blend_type: 'feather' (por defecto). Si en el futuro se implementa, puede admitirse 'multiband'.
 
     Returns:
         panorama: imagen panorámica (np.uint8, BGR).
     """
-    # asegurar 3 canales
+
     def _bgr(img):
-        if img.ndim==2: return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        if img.shape[2]==4: return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        if img.ndim == 2:
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        if img.shape[2] == 4:
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
         return img
+
     imgL, imgC, imgR = _bgr(imgL), _bgr(imgC), _bgr(imgR)
 
     hC, wC = imgC.shape[:2]
 
-    # esquinas de cada imagen
     def corners(img):
         h, w = img.shape[:2]
-        return np.array([[0,0],[w,0],[w,h],[0,h]], dtype=np.float32).reshape(-1,1,2)
+        return np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
 
     cornersC = corners(imgC)
     cornersL_warp = cv2.perspectiveTransform(corners(imgL), H_LC)
@@ -263,29 +272,119 @@ def stitch_three_images(imgL, imgC, imgR, H_LC, H_RC):
 
     all_corners = np.vstack((cornersC, cornersL_warp, cornersR_warp))
 
-    # calcular bounding box global
     [xmin, ymin] = np.floor(all_corners.min(axis=0).ravel()).astype(int)
     [xmax, ymax] = np.ceil(all_corners.max(axis=0).ravel()).astype(int)
 
-    # compensar traslación para evitar índices negativos
-    tx, ty = -xmin if xmin<0 else 0, -ymin if ymin<0 else 0
-    T = np.array([[1,0,tx],[0,1,ty],[0,0,1]], dtype=np.float64)
+    tx, ty = -xmin if xmin < 0 else 0, -ymin if ymin < 0 else 0
+    T = np.array([[1, 0, tx], [0, 1, ty], [0, 0, 1]], dtype=np.float64)
 
     width, height = xmax - xmin, ymax - ymin
 
-    # warpear L y R
-    panorama = np.zeros((height, width, 3), dtype=np.uint8)
+    # warpear imágenes
     warpL = cv2.warpPerspective(imgL, T @ H_LC, (width, height))
     warpR = cv2.warpPerspective(imgR, T @ H_RC, (width, height))
     warpC = cv2.warpPerspective(imgC, T, (width, height))  # solo traslación
 
-    # combinar (superposición simple: donde hay píxeles ≠0, se quedan)
-    maskL = (warpL>0).astype(np.uint8)
-    maskR = (warpR>0).astype(np.uint8)
-    maskC = (warpC>0).astype(np.uint8)
+    # máscaras booleanas (presencia de píxel)
+    maskL = np.any(warpL != 0, axis=2).astype(np.uint8)
+    maskR = np.any(warpR != 0, axis=2).astype(np.uint8)
+    maskC = np.any(warpC != 0, axis=2).astype(np.uint8)
 
-    panorama = np.where(maskC, warpC, panorama)
-    panorama = np.where(maskL, warpL, panorama)
-    panorama = np.where(maskR, warpR, panorama)
+    # compensación de exposición simple (ganancia por canal basada en la mediana del solapamiento)
+    def compensate_exp(src, ref, mask_src, mask_ref):
+        overlap = (mask_src.astype(bool)) & (mask_ref.astype(bool))
+        if not np.any(overlap):
+            return src  # sin solapamiento, no tocar
+        src_f = src.astype(np.float32)
+        ref_f = ref.astype(np.float32)
+        gains = np.ones(3, dtype=np.float32)
+        for c in range(3):
+            src_vals = src_f[:, :, c][overlap]
+            ref_vals = ref_f[:, :, c][overlap]
+            # evitar ceros y valores fuera de rango
+            valid = (src_vals > 1) & (ref_vals > 1)
+            if np.any(valid):
+                # usar mediana de razones (robusta frente a outliers)
+                ratio = np.median(ref_vals[valid] / (src_vals[valid] + 1e-8))
+                # limitar ratio para evitar cambios extremos
+                ratio = float(np.clip(ratio, 0.7, 1.3))
+                gains[c] = ratio
+        # aplicar ganancia por canal
+        out = src.astype(np.float32)
+        out[:, :, 0] *= gains[0]
+        out[:, :, 1] *= gains[1]
+        out[:, :, 2] *= gains[2]
+        out = np.clip(out, 0, 255).astype(np.uint8)
+        return out
+
+    if exposure_compensate:
+        # ajustar L y R para que su exposición sea coherente con C
+        warpL = compensate_exp(warpL, warpC, maskL, maskC)
+        warpR = compensate_exp(warpR, warpC, maskR, maskC)
+
+        # recomputar masks porque pueden haber cambiado por el clamp
+        maskL = np.any(warpL != 0, axis=2).astype(np.uint8)
+        maskR = np.any(warpR != 0, axis=2).astype(np.uint8)
+
+    # blending: feathering usando distance transform
+    def make_weight_map(mask):
+        # mask: uint8 0/1
+        if np.count_nonzero(mask) == 0:
+            return np.zeros_like(mask, dtype=np.float32)
+        mask_u8 = (mask * 255).astype(np.uint8)
+        # distanceTransform requiere fondo=0, foreground>0
+        dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
+        # normalizar por el máximo para que el centro tenga peso ~1
+        maxv = dist.max()
+        if maxv > 0:
+            dist = dist / maxv
+        # suavizar un poco para evitar artefactos
+        dist = cv2.GaussianBlur(dist, (0, 0), sigmaX=3, sigmaY=3)
+        return dist.astype(np.float32)
+
+    wL = make_weight_map(maskL)
+    wC = make_weight_map(maskC)
+    wR = make_weight_map(maskR)
+
+    # evitar que en zonas sin solapamiento el centro se vea débil: si un sólo mask presente, darle peso 1
+    singleL = (maskL == 1) & (maskC == 0) & (maskR == 0)
+    singleR = (maskR == 1) & (maskC == 0) & (maskL == 0)
+    singleC = (maskC == 1) & (maskL == 0) & (maskR == 0)
+    wL[singleL] = 1.0
+    wR[singleR] = 1.0
+    wC[singleC] = 1.0
+
+    # combinación ponderada
+    # convertir imágenes a float32
+    warpL_f = warpL.astype(np.float32)
+    warpC_f = warpC.astype(np.float32)
+    warpR_f = warpR.astype(np.float32)
+
+    # sumar pesos por canal (broadcast)
+    W = (wL + wC + wR).astype(np.float32)
+    W3 = np.stack([W, W, W], axis=2)
+
+    numerator = (warpL_f * np.stack([wL, wL, wL], axis=2) +
+                 warpC_f * np.stack([wC, wC, wC], axis=2) +
+                 warpR_f * np.stack([wR, wR, wR], axis=2))
+
+    # evitar división por cero
+    eps = 1e-8
+    panorama_f = numerator / (W3 + eps)
+
+    # donde no hay pixel (W==0) dejar negro
+    panorama = np.clip(panorama_f, 0, 255).astype(np.uint8)
 
     return panorama
+
+
+if __name__ == '__main__':
+    # ejemplo de uso (requiere cv2 y numpy)
+    # imgL = cv2.imread('left.jpg')
+    # imgC = cv2.imread('center.jpg')
+    # imgR = cv2.imread('right.jpg')
+    # H_LC = np.eye(3)  # reemplazar con homografía real
+    # H_RC = np.eye(3)
+    # pano = stitch_three_images(imgL, imgC, imgR, H_LC, H_RC)
+    # cv2.imwrite('panorama.jpg', pano)
+    pass
