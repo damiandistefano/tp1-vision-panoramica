@@ -114,34 +114,6 @@ def pick_points_cv(img, win_name="Pick 4 points", n_points=4, out_npy=None):
     return pts
 
 
-# ---------- DLT (sin normalización) ----------
-def _homography_dlt(xy1, xy2):
-    """
-    Estima H (3x3) con DLT (sin normalización).
-    xy1 -> xy2  (N>=4)
-    """
-    xy1 = np.asarray(xy1, dtype=np.float64)
-    xy2 = np.asarray(xy2, dtype=np.float64)
-    assert xy1.shape == xy2.shape and xy1.shape[0] >= 4
-
-    N = xy1.shape[0]
-    A = []
-    for i in range(N):
-        x, y   = xy1[i]
-        u, v   = xy2[i]
-        A.append([0, 0, 0, -x, -y, -1, v*x, v*y, v])
-        A.append([x, y, 1,  0,  0,  0, -u*x, -u*y, -u])
-    A = np.asarray(A, dtype=np.float64)
-
-    # Resolver Ah=0 con SVD
-    _, _, Vt = np.linalg.svd(A)
-    H = Vt[-1].reshape(3,3)
-
-    # Normalizar tal que H[2,2] = 1 (si se puede)
-    if abs(H[2,2]) > 1e-12:
-        H = H / H[2,2]
-    return H
-
 def reprojection_rmse(H, src, dst):
     N = src.shape[0]
     src_h = np.hstack([src, np.ones((N,1))])
@@ -149,7 +121,6 @@ def reprojection_rmse(H, src, dst):
     proj  = proj[:, :2] / proj[:, 2:3]
     d = np.linalg.norm(proj - dst, axis=1)  # error por punto en píxeles
     return float(np.sqrt(np.mean(d**2))), d
-
 
 
 def _normalize_points(pts):
